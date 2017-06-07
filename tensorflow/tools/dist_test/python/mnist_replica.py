@@ -16,9 +16,9 @@
 """Distributed MNIST training and validation, with model replicas.
 
 A simple softmax model with one hidden layer is defined. The parameters
-(weights and biases) are located on two parameter servers (ps), while the
-ops are defined on a worker node. The TF sessions also run on the worker
-node.
+(weights and biases) are located on one parameter server (ps), while the ops
+are executed on two worker nodes by default. The TF sessions also run on the 
+worker node.
 Multiple invocations of this script can be done in parallel, with different
 values for --task_index. There should be exactly one invocation with
 --task_index, which will create a master session that carries out variable
@@ -177,7 +177,7 @@ def main(unused_argv):
       else:
         replicas_to_aggregate = FLAGS.replicas_to_aggregate
 
-      opt = tf.train.SyncReplicasOptimizerV2(
+      opt = tf.train.SyncReplicasOptimizer(
           opt,
           replicas_to_aggregate=replicas_to_aggregate,
           total_num_replicas=num_workers,

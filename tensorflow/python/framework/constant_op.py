@@ -13,82 +13,18 @@
 # limitations under the License.
 # ==============================================================================
 
-"""## Constant Value Tensors
+"""Operations that generate constants.
 
-TensorFlow provides several operations that you can use to generate constants.
+See the @{$python/constant_op$constants guide}.
 
 @@zeros
 @@zeros_like
-
 @@ones
 @@ones_like
-
 @@fill
-
 @@constant
-
-## Sequences
-
 @@linspace
-
 @@range
-
-## Random Tensors
-
-TensorFlow has several ops that create random tensors with different
-distributions.  The random ops are stateful, and create new random values each
-time they are evaluated.
-
-The `seed` keyword argument in these functions acts in conjunction with
-the graph-level random seed. Changing either the graph-level seed using
-[`set_random_seed`](../../api_docs/python/constant_op.md#set_random_seed) or the
-op-level seed will change the underlying seed of these operations. Setting
-neither graph-level nor op-level seed, results in a random seed for all
-operations.
-See [`set_random_seed`](../../api_docs/python/constant_op.md#set_random_seed)
-for details on the interaction between operation-level and graph-level random
-seeds.
-
-### Examples:
-
-```python
-# Create a tensor of shape [2, 3] consisting of random normal values, with mean
-# -1 and standard deviation 4.
-norm = tf.random_normal([2, 3], mean=-1, stddev=4)
-
-# Shuffle the first dimension of a tensor
-c = tf.constant([[1, 2], [3, 4], [5, 6]])
-shuff = tf.random_shuffle(c)
-
-# Each time we run these ops, different results are generated
-sess = tf.Session()
-print(sess.run(norm))
-print(sess.run(norm))
-
-# Set an op-level seed to generate repeatable sequences across sessions.
-norm = tf.random_normal([2, 3], seed=1234)
-sess = tf.Session()
-print(sess.run(norm))
-print(sess.run(norm))
-sess = tf.Session()
-print(sess.run(norm))
-print(sess.run(norm))
-```
-
-Another common use of random values is the initialization of variables. Also see
-the [Variables How To](../../how_tos/variables/index.md).
-
-```python
-# Use random uniform values in [0, 1) as the initializer for a variable of shape
-# [2, 3]. The default type is float32.
-var = tf.Variable(tf.random_uniform([2, 3]), name="var")
-init = tf.global_variables_initializer()
-
-sess = tf.Session()
-sess.run(init)
-print(sess.run(var))
-```
-
 @@random_normal
 @@truncated_normal
 @@random_uniform
@@ -96,6 +32,7 @@ print(sess.run(var))
 @@random_crop
 @@multinomial
 @@random_gamma
+@@random_poisson
 @@set_random_seed
 """
 
@@ -108,14 +45,13 @@ from __future__ import print_function
 import numpy as np
 
 from tensorflow.core.framework import attr_value_pb2
-from tensorflow.python.framework import common_shapes
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import tensor_shape
 from tensorflow.python.framework import tensor_util
 
 
-def constant(value, dtype=None, shape=None, name="Const"):
+def constant(value, dtype=None, shape=None, name="Const", verify_shape=False):
   """Creates a constant tensor.
 
    The resulting tensor is populated with values of type `dtype`, as
@@ -147,13 +83,15 @@ def constant(value, dtype=None, shape=None, name="Const"):
    ```
 
   Args:
-    value:     A constant value (or list) of output type `dtype`.
+    value:          A constant value (or list) of output type `dtype`.
 
-    dtype:     The type of the elements of the resulting tensor.
+    dtype:          The type of the elements of the resulting tensor.
 
-    shape:     Optional dimensions of resulting tensor.
+    shape:          Optional dimensions of resulting tensor.
 
-    name:      Optional name for the tensor.
+    name:           Optional name for the tensor.
+
+    verify_shape:   Boolean that enables verification of a shape of values.
 
   Returns:
     A Constant Tensor.
@@ -161,7 +99,7 @@ def constant(value, dtype=None, shape=None, name="Const"):
   g = ops.get_default_graph()
   tensor_value = attr_value_pb2.AttrValue()
   tensor_value.tensor.CopyFrom(
-      tensor_util.make_tensor_proto(value, dtype=dtype, shape=shape))
+      tensor_util.make_tensor_proto(value, dtype=dtype, shape=shape, verify_shape=verify_shape))
   dtype_value = attr_value_pb2.AttrValue(type=tensor_value.tensor.dtype)
   const_tensor = g.create_op(
       "Const", [], [dtype_value.type],
@@ -169,7 +107,12 @@ def constant(value, dtype=None, shape=None, name="Const"):
   return const_tensor
 
 
-ops.RegisterShape("Const")(common_shapes.call_cpp_shape_fn)
+def is_constant(tensor_or_op):
+  if isinstance(tensor_or_op, ops.Tensor):
+    op = tensor_or_op.op
+  else:
+    op = tensor_or_op
+  return op.type == "Const"
 
 
 def _constant_tensor_conversion_function(v, dtype=None, name=None,
@@ -194,14 +137,24 @@ def _tensor_shape_tensor_conversion_function(s, dtype=None, name=None,
   if not s.is_fully_defined():
     raise ValueError(
         "Cannot convert a partially known TensorShape to a Tensor: %s" % s)
+  s_list = s.as_list()
+  int64_value = 0
+  for dim in s_list:
+    if dim >= 2**31:
+      int64_value = dim
+      break
+
   if dtype is not None:
     if dtype not in (dtypes.int32, dtypes.int64):
       raise TypeError("Cannot convert a TensorShape to dtype: %s" % dtype)
+    if dtype == dtypes.int32 and int64_value:
+      raise ValueError("Cannot convert a TensorShape to dtype int32; "
+                       "a dimension is too large (%s)" % int64_value)
   else:
-    dtype = dtypes.int32
+    dtype = dtypes.int64 if int64_value else dtypes.int32
   if name is None:
     name = "shape_as_tensor"
-  return constant(s.as_list(), dtype=dtype, name=name)
+  return constant(s_list, dtype=dtype, name=name)
 
 ops.register_tensor_conversion_function(
     tensor_shape.TensorShape, _tensor_shape_tensor_conversion_function, 100)

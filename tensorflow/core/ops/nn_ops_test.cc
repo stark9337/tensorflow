@@ -14,7 +14,6 @@ limitations under the License.
 ==============================================================================*/
 
 #include "tensorflow/core/framework/fake_input.h"
-#include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/framework/node_def_builder.h"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/shape_inference_testutil.h"
@@ -507,7 +506,7 @@ TEST(NNOpsTest, FractionalPool_ShapeFn) {
                        .Finalize(&op.node_def));
     };
 
-    set_op(std::vector<float>{2.0, 1, 1 / 1.5, 1 / 2.0});
+    set_op(std::vector<float>{2.0f, 1, 1 / 1.5f, 1 / 2.0f});
 
     // Rank check.
     INFER_ERROR("must be rank 4", op, "[?,?,?]");

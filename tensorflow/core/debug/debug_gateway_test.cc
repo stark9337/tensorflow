@@ -16,8 +16,10 @@ limitations under the License.
 #include "tensorflow/core/debug/debug_gateway.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <unordered_map>
 
+#include "tensorflow/core/debug/debug_graph_utils.h"
 #include "tensorflow/core/framework/tensor_testutil.h"
 #include "tensorflow/core/graph/testlib.h"
 #include "tensorflow/core/lib/core/notification.h"
@@ -44,6 +46,8 @@ class SessionDebugMinusAXTest : public ::testing::Test {
 
 #if GOOGLE_CUDA
     const string kDeviceName = "/job:localhost/replica:0/task:0/gpu:0";
+#elif defined(TENSORFLOW_USE_SYCL)
+    const string kDeviceName = "/job:localhost/replica:0/task:0/device:SYCL:0";
 #else
     const string kDeviceName = "/job:localhost/replica:0/task:0/cpu:0";
 #endif
@@ -228,7 +232,8 @@ TEST_F(SessionDebugMinusAXTest, RunSimpleNetworkWithTwoDebugNodesInserted) {
 
   const string debug_identity = "DebugIdentity";
   const string debug_nan_count = "DebugNanCount";
-  DebugTensorWatch* tensor_watch_opts = run_opts.add_debug_tensor_watch_opts();
+  DebugTensorWatch* tensor_watch_opts =
+      run_opts.mutable_debug_options()->add_debug_tensor_watch_opts();
   tensor_watch_opts->set_node_name(y_);
   tensor_watch_opts->set_output_slot(0);
   tensor_watch_opts->add_debug_ops(debug_identity);
@@ -300,6 +305,8 @@ TEST_F(SessionDebugMinusAXTest, RunSimpleNetworkWithTwoDebugNodesInserted) {
 // through RunMetadata, given whether GPU is involved.
 #if GOOGLE_CUDA
   ASSERT_EQ(2, run_metadata.partition_graphs().size());
+#elif defined(TENSORFLOW_USE_SYCL)
+  ASSERT_EQ(2, run_metadata.partition_graphs().size());
 #else
   ASSERT_EQ(1, run_metadata.partition_graphs().size());
 #endif
@@ -334,6 +341,10 @@ TEST_F(SessionDebugMinusAXTest, RunSimpleNetworkWithTwoDebugNodesInserted) {
   ASSERT_EQ(1, debug_nan_count_tensor_vals[0].scalar<int64>()());
 }
 
+#if !defined(GOOGLE_CUDA) && !defined(TENSORFLOW_USE_SYCL)
+// TODO(cais): Reinstate the following test for concurrent debugged runs on
+//   a GPU once the root cause of the ~0.5% flakiness has been addressed.
+//   (b/34081273)
 TEST_F(SessionDebugMinusAXTest,
        RunSimpleNetworkConcurrentlyWithDifferentDebugTensorWatches) {
   // Test concurrent Run() calls on a graph with different debug watches.
@@ -370,9 +381,9 @@ TEST_F(SessionDebugMinusAXTest,
   debug_gateway.SetNodeValueCallback(
       [this, &mu, &val_callback_count, &a_debug_identity_node_name,
        &x_debug_identity_node_name, &y_debug_identity_node_name,
-       &debug_identity_tensor_vals,
-       &callbacks_done](const string& node_name, const int output_slot,
-                        const Tensor& tensor_value, const bool is_ref) {
+       &debug_identity_tensor_vals, &callbacks_done, &kConcurrentRuns](
+           const string& node_name, const int output_slot,
+           const Tensor& tensor_value, const bool is_ref) {
         mutex_lock l(mu);
 
         if (node_name == a_debug_identity_node_name && output_slot == 0) {
@@ -409,7 +420,7 @@ TEST_F(SessionDebugMinusAXTest,
     run_opts.set_output_partition_graphs(true);
 
     DebugTensorWatch* tensor_watch_opts =
-        run_opts.add_debug_tensor_watch_opts();
+        run_opts.mutable_debug_options()->add_debug_tensor_watch_opts();
     tensor_watch_opts->set_output_slot(0);
     tensor_watch_opts->add_debug_ops(debug_identity);
 
@@ -440,11 +451,7 @@ TEST_F(SessionDebugMinusAXTest,
                             &outputs, &run_metadata);
     TF_ASSERT_OK(s);
 
-#if GOOGLE_CUDA
-    ASSERT_EQ(2, run_metadata.partition_graphs().size());
-#else
     ASSERT_EQ(1, run_metadata.partition_graphs().size());
-#endif
 
     ASSERT_EQ(1, outputs.size());
     ASSERT_TRUE(outputs[0].IsInitialized());
@@ -488,6 +495,7 @@ TEST_F(SessionDebugMinusAXTest,
     ASSERT_EQ(-1.0, y_mat_identity(1, 0));
   }
 }
+#endif
 
 class SessionDebugOutputSlotWithoutOngoingEdgeTest : public ::testing::Test {
  public:
@@ -496,6 +504,8 @@ class SessionDebugOutputSlotWithoutOngoingEdgeTest : public ::testing::Test {
 
 #if GOOGLE_CUDA
     const string kDeviceName = "/job:localhost/replica:0/task:0/gpu:0";
+#elif defined(TENSORFLOW_USE_SYCL)
+    const string kDeviceName = "/job:localhost/replica:0/task:0/device:SYCL:0";
 #else
     const string kDeviceName = "/job:localhost/replica:0/task:0/cpu:0";
 #endif
@@ -561,7 +571,8 @@ TEST_F(SessionDebugOutputSlotWithoutOngoingEdgeTest,
   RunOptions run_opts;
   run_opts.set_output_partition_graphs(true);
 
-  DebugTensorWatch* tensor_watch_opts = run_opts.add_debug_tensor_watch_opts();
+  DebugTensorWatch* tensor_watch_opts =
+      run_opts.mutable_debug_options()->add_debug_tensor_watch_opts();
   tensor_watch_opts->set_node_name(c_);
   tensor_watch_opts->set_output_slot(0);
   tensor_watch_opts->add_debug_ops("DebugIdentity");
@@ -595,6 +606,8 @@ class SessionDebugVariableTest : public ::testing::Test {
 
 #if GOOGLE_CUDA
     const string kDeviceName = "/job:localhost/replica:0/task:0/gpu:0";
+#elif defined(TENSORFLOW_USE_SYCL)
+    const string kDeviceName = "/job:localhost/replica:0/task:0/device:SYCL:0";
 #else
     const string kDeviceName = "/job:localhost/replica:0/task:0/cpu:0";
 #endif
@@ -659,7 +672,8 @@ TEST_F(SessionDebugVariableTest, WatchUninitializedVariableWithDebugOps) {
   // Set up DebugTensorWatch for an uninitialized tensor (in node var).
   RunOptions run_opts;
   const string debug_identity = "DebugIdentity";
-  DebugTensorWatch* tensor_watch_opts = run_opts.add_debug_tensor_watch_opts();
+  DebugTensorWatch* tensor_watch_opts =
+      run_opts.mutable_debug_options()->add_debug_tensor_watch_opts();
   tensor_watch_opts->set_node_name(var_node_name_);
   tensor_watch_opts->set_output_slot(0);
   tensor_watch_opts->add_debug_ops(debug_identity);
@@ -746,11 +760,16 @@ TEST_F(SessionDebugVariableTest, VariableAssignWithDebugOps) {
   run_opts.set_output_partition_graphs(true);
   const string debug_identity = "DebugIdentity";
   const string debug_nan_count = "DebugNanCount";
-  DebugTensorWatch* tensor_watch_opts = run_opts.add_debug_tensor_watch_opts();
+  DebugTensorWatch* tensor_watch_opts =
+      run_opts.mutable_debug_options()->add_debug_tensor_watch_opts();
   tensor_watch_opts->set_node_name(var_node_name_);
   tensor_watch_opts->set_output_slot(0);
   tensor_watch_opts->add_debug_ops(debug_identity);
   tensor_watch_opts->add_debug_ops(debug_nan_count);
+
+  char tempdir_template[] = "/tmp/tfdbg_XXXXXX";
+  string temp_dir(mkdtemp(tempdir_template));
+  tensor_watch_opts->add_debug_urls(strings::StrCat("file://", temp_dir));
 
   // Expected name of the inserted debug node
   string debug_identity_node_name = DebugNodeInserter::GetDebugNodeName(
@@ -812,6 +831,8 @@ TEST_F(SessionDebugVariableTest, VariableAssignWithDebugOps) {
 
 #if GOOGLE_CUDA
   ASSERT_EQ(2, run_metadata.partition_graphs().size());
+#elif defined(TENSORFLOW_USE_SYCL)
+  ASSERT_EQ(2, run_metadata.partition_graphs().size());
 #else
   ASSERT_EQ(1, run_metadata.partition_graphs().size());
 #endif
@@ -849,13 +870,17 @@ TEST_F(SessionDebugVariableTest, VariableAssignWithDebugOps) {
   ASSERT_EQ(2, debug_nan_count_tensor_vals[0].scalar<int64>()());
 }
 
-#if GOOGLE_CUDA
+#if defined(GOOGLE_CUDA) || defined(TENSORFLOW_USE_SYCL)
 class SessionDebugGPUSwitchTest : public ::testing::Test {
  public:
   void Initialize() {
     Graph graph(OpRegistry::Global());
 
+#ifdef GOOGLE_CUDA
     const string kDeviceName = "/job:localhost/replica:0/task:0/gpu:0";
+#elif TENSORFLOW_USE_SYCL
+    const string kDeviceName = "/job:localhost/replica:0/task:0/device:SYCL:0";
+#endif
 
     Tensor vb(DT_BOOL, TensorShape({}));
     vb.scalar<bool>()() = true;
@@ -904,7 +929,8 @@ TEST_F(SessionDebugGPUSwitchTest, RunSwitchWithHostMemoryDebugOp) {
   const string watched_tensor = strings::StrCat(pred_node_name_, "/_1");
 
   const string debug_identity = "DebugIdentity";
-  DebugTensorWatch* tensor_watch_opts = run_opts.add_debug_tensor_watch_opts();
+  DebugTensorWatch* tensor_watch_opts =
+      run_opts.mutable_debug_options()->add_debug_tensor_watch_opts();
   tensor_watch_opts->set_node_name(watched_tensor);
   tensor_watch_opts->set_output_slot(0);
   tensor_watch_opts->add_debug_ops(debug_identity);

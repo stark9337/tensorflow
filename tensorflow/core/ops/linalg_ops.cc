@@ -109,6 +109,36 @@ Status SelfAdjointEigV2ShapeFn(InferenceContext* c) {
   return Status::OK();
 }
 
+// Input is [...,M,N].
+// First and second outputs are:
+//   [...,M,M]; [...,M,N], if full_matrices is true,
+//   [...,M,P]; [...,P,N], if full_matrices is false,
+// where P = min(M,N).
+Status QrShapeFn(InferenceContext* c) {
+  ShapeHandle input;
+  TF_RETURN_IF_ERROR(c->WithRankAtLeast(c->input(0), 2, &input));
+  DimensionHandle m = c->Dim(input, -2);
+  DimensionHandle n = c->Dim(input, -1);
+  DimensionHandle p;
+  TF_RETURN_IF_ERROR(c->Min(m, n, &p));
+  ShapeHandle batch_shape;
+  TF_RETURN_IF_ERROR(c->Subshape(input, 0, -2, &batch_shape));
+  ShapeHandle q_shape;
+  ShapeHandle r_shape;
+  bool full_matrices;
+  TF_RETURN_IF_ERROR(c->GetAttr("full_matrices", &full_matrices));
+  if (full_matrices) {
+    TF_RETURN_IF_ERROR(c->Concatenate(batch_shape, c->Matrix(m, m), &q_shape));
+    TF_RETURN_IF_ERROR(c->Concatenate(batch_shape, c->Matrix(m, n), &r_shape));
+  } else {
+    TF_RETURN_IF_ERROR(c->Concatenate(batch_shape, c->Matrix(m, p), &q_shape));
+    TF_RETURN_IF_ERROR(c->Concatenate(batch_shape, c->Matrix(p, n), &r_shape));
+  }
+  c->set_output(0, q_shape);
+  c->set_output(1, r_shape);
+  return Status::OK();
+}
+
 // Input is [...,M,N].  First output is [...,min(M,N)].
 // Second and third outputs are:
 //   [0]; [0], if compute_uv is false.
@@ -188,7 +218,7 @@ REGISTER_OP("MatrixInverse")
     .Input("input: T")
     .Output("output: T")
     .Attr("adjoint: bool = False")
-    .Attr("T: {double, float}")
+    .Attr("T: {double, float, complex64, complex128}")
     .SetShapeFn(BatchUnchangedSquareShapeFn)
     .Doc(R"doc(
 Computes the inverse of one or more square invertible matrices or their
@@ -206,20 +236,33 @@ garbage result.
 
 input: Shape is `[..., M, M]`.
 output: Shape is `[..., M, M]`.
+
+@compatibility(numpy)
+Equivalent to np.linalg.inv
+@end_compatibility
 )doc");
 
 REGISTER_OP("Cholesky")
     .Input("input: T")
     .Output("output: T")
-    .Attr("T: {double, float}")
+    .Attr("T: {double, float, complex64, complex128}")
     .SetShapeFn(BatchUnchangedSquareShapeFn)
     .Doc(R"doc(
 Computes the Cholesky decomposition of one or more square matrices.
 
 The input is a tensor of shape `[..., M, M]` whose inner-most 2 dimensions
-form square matrices, with the same constraints as the single matrix Cholesky
-decomposition above. The output is a tensor of the same shape as the input
+form square matrices.
+
+The input has to be symmetric and positive definite. Only the lower-triangular
+part of the input will be used for this operation. The upper-triangular part
+will not be read.
+
+The output is a tensor of the same shape as the input
 containing the Cholesky decompositions for all input submatrices `[..., :, :]`.
+
+**Note**: The gradient computation on GPU is faster for large matrices but
+not for large batch dimensions when the submatrices are small. In this
+case it might be faster to use the CPU.
 
 input: Shape is `[..., M, M]`.
 output: Shape is `[..., M, M]`.
@@ -284,7 +327,7 @@ REGISTER_OP("SelfAdjointEigV2")
     .Output("e: T")
     .Output("v: T")
     .Attr("compute_v: bool = True")
-    .Attr("T: {double, float}")
+    .Attr("T: {double, float, complex64, complex128}")
     .SetShapeFn(SelfAdjointEigV2ShapeFn)
     .Doc(R"doc(
 Computes the eigen decomposition of one or more square self-adjoint matrices.
@@ -292,7 +335,7 @@ Computes the eigen decomposition of one or more square self-adjoint matrices.
 Computes the eigenvalues and (optionally) eigenvectors of each inner matrix in
 `input` such that `input[..., :, :] = v[..., :, :] * diag(e[..., :])`.
 
-```prettyprint
+```python
 # a is a tensor.
 # e is a tensor of eigenvalues.
 # v is a tensor of eigenvectors.
@@ -339,7 +382,7 @@ REGISTER_OP("MatrixTriangularSolve")
     .Output("output: T")
     .Attr("lower: bool = True")
     .Attr("adjoint: bool = False")
-    .Attr("T: {double, float}")
+    .Attr("T: {double, float, complex64, complex128}")
     .SetShapeFn([](InferenceContext* c) {
       return MatrixSolveShapeFn(c, true /* square (*/);
     })
@@ -368,6 +411,10 @@ lower: Boolean indicating whether the innermost matrices in `matrix` are
        lower or upper triangular.
 adjoint: Boolean indicating whether to solve with `matrix` or its (block-wise)
          adjoint.
+
+@compatibility(numpy)
+Equivalent to np.linalg.triangular_solve
+@end_compatibility
 )doc");
 
 REGISTER_OP("MatrixSolveLs")
@@ -401,14 +448,14 @@ matrix and right-hand sides in the batch:
 If `fast` is `True`, then the solution is computed by solving the normal
 equations using Cholesky decomposition. Specifically, if \\(m \ge n\\) then
 \\(X = (A^T A + \lambda I)^{-1} A^T B\\), which solves the least-squares
-problem \\(X = \mathrm{argmin}_{Z \in \Re^{n \times k}} ||A Z - B||_F^2 +
+problem \\(X = \mathrm{argmin}_{Z \in \Re^{n \times k} } ||A Z - B||_F^2 +
 \lambda ||Z||_F^2\\). If \\(m \lt n\\) then `output` is computed as
 \\(X = A^T (A A^T + \lambda I)^{-1} B\\), which (for \\(\lambda = 0\\)) is the
 minimum-norm solution to the under-determined linear system, i.e.
-\\(X = \mathrm{argmin}_{Z \in \Re^{n \times k}} ||Z||_F^2 \\), subject to
+\\(X = \mathrm{argmin}_{Z \in \Re^{n \times k} } ||Z||_F^2 \\), subject to
 \\(A Z = B\\). Notice that the fast path is only numerically stable when
 \\(A\\) is numerically full rank and has a condition number
-\\(\mathrm{cond}(A) \lt \frac{1}{\sqrt{\epsilon_{mach}}}\\) or\\(\lambda\\) is
+\\(\mathrm{cond}(A) \lt \frac{1}{\sqrt{\epsilon_{mach} } }\\) or\\(\lambda\\) is
 sufficiently large.
 
 If `fast` is `False` an algorithm based on the numerically robust complete
@@ -421,6 +468,42 @@ matrix: Shape is `[..., M, N]`.
 rhs: Shape is `[..., M, K]`.
 output: Shape is `[..., N, K]`.
 l2_regularizer: Scalar tensor.
+
+@compatibility(numpy)
+Equivalent to np.linalg.lstsq
+@end_compatibility
+)doc");
+
+REGISTER_OP("Qr")
+    .Input("input: T")
+    .Output("q: T")
+    .Output("r: T")
+    .Attr("full_matrices: bool = False")
+    .Attr("T: {double, float, complex64, complex128}")
+    .SetShapeFn(QrShapeFn)
+    .Doc(R"doc(
+Computes the QR decompositions of one or more matrices.
+
+Computes the QR decomposition of each inner matrix in `tensor` such that
+`tensor[..., :, :] = q[..., :, :] * r[..., :,:])`
+
+```python
+# a is a tensor.
+# q is a tensor of orthonormal matrices.
+# r is a tensor of upper triangular matrices.
+q, r = qr(a)
+q_full, r_full = qr(a, full_matrices=True)
+```
+
+input: A tensor of shape `[..., M, N]` whose inner-most 2 dimensions
+  form matrices of size `[M, N]`. Let `P` be the minimum of `M` and `N`.
+q: Orthonormal basis for range of `a`. If `full_matrices` is `False` then
+  shape is `[..., M, P]`; if `full_matrices` is `True` then shape is
+  `[..., M, M]`.
+r: Triangular factor. If `full_matrices` is `False` then shape is
+  `[..., P, N]`. If `full_matrices` is `True` then shape is `[..., M, N]`.
+full_matrices: If true, compute full-sized `q` and `r`. If false
+  (the default), compute only the leading `P` columns of `q`.
 )doc");
 
 REGISTER_OP("Svd")
@@ -438,7 +521,7 @@ Computes the singular value decompositions of one or more matrices.
 Computes the SVD of each inner matrix in `input` such that
 `input[..., :, :] = u[..., :, :] * diag(s[..., :, :]) * transpose(v[..., :, :])`
 
-```prettyprint
+```python
 # a is a tensor containing a batch of matrices.
 # s is a tensor of singular values for each matrix.
 # u is the tensor containing of left singular vectors for each matrix.
@@ -451,10 +534,10 @@ input: A tensor of shape `[..., M, N]` whose inner-most 2 dimensions
   form matrices of size `[M, N]`. Let `P` be the minimum of `M` and `N`.
 s: Singular values. Shape is `[..., P]`.
 u: Left singular vectors. If `full_matrices` is `False` then shape is
-  `[..., M, M]`; if `full_matrices` is `True` then shape is
-  `[..., M, P]`. Undefined if `compute_uv` is `False`.
+  `[..., M, P]`; if `full_matrices` is `True` then shape is
+  `[..., M, M]`. Undefined if `compute_uv` is `False`.
 v: Left singular vectors. If `full_matrices` is `False` then shape is
-  `[..., N, N]`. If `full_matrices` is `True` then shape is `[..., N, P]`.
+  `[..., N, P]`. If `full_matrices` is `True` then shape is `[..., N, N]`.
   Undefined if `compute_uv` is false.
 compute_uv: If true, left and right singular vectors will be
   computed and returned in `u` and `v`, respectively.

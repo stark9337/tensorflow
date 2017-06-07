@@ -18,6 +18,8 @@ import {ProjectorConfig, DataProvider, EmbeddingInfo, TENSORS_MSG_ID} from './da
 import * as dataProvider from './data-provider';
 import * as logging from './logging';
 
+const BYTES_EXTENSION = '.bytes';
+
 /** Data provider that loads data from a demo folder. */
 export class DemoDataProvider implements DataProvider {
   private projectorConfigPath: string;
@@ -44,38 +46,54 @@ export class DemoDataProvider implements DataProvider {
 
   retrieveProjectorConfig(run: string, callback: (d: ProjectorConfig) => void)
       : void {
-    let msgId = logging.setModalMessage('Fetching projector config...');
-    d3.json(this.projectorConfigPath, (err, projectorConfig) => {
-      if (err) {
-        logging.setModalMessage('Error: ' + err.responseText);
-        return;
+    const msgId = logging.setModalMessage('Fetching projector config...');
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', this.projectorConfigPath);
+    xhr.onerror = (err) => {
+      let errorMessage = err.message;
+      // If the error is a valid XMLHttpResponse, it's possible this is a
+      // cross-origin error.
+      if (xhr.responseText != null) {
+        errorMessage = 'Cannot fetch projector config, possibly a ' +
+            'Cross-Origin request error.';
       }
+      logging.setErrorMessage(errorMessage, 'fetching projector config');
+    };
+    xhr.onload = () => {
+      const projectorConfig = JSON.parse(xhr.responseText) as ProjectorConfig;
       logging.setModalMessage(null, msgId);
       this.projectorConfig = projectorConfig;
       callback(projectorConfig);
-    });
-  }
-
-  getDefaultTensor(run: string, callback: (tensorName: string) => void) {
-    // Return the first tensor as the default tensor.
-    callback(this.projectorConfig.embeddings[0].tensorName);
+    };
+    xhr.send();
   }
 
   retrieveTensor(run: string, tensorName: string,
       callback: (ds: DataSet) => void) {
     let embedding = this.getEmbeddingInfo(tensorName);
-    let separator = embedding.tensorPath.substr(-3) === 'tsv' ? '\t' : ' ';
     let url = `${embedding.tensorPath}`;
-    logging.setModalMessage('Fetching tensors...', TENSORS_MSG_ID);
-    d3.text(url, (error: any, dataString: string) => {
-      if (error) {
-        logging.setModalMessage('Error: ' + error.responseText);
-        return;
-      }
-      dataProvider.parseTensors(dataString, separator).then(points => {
-        callback(new DataSet(points));
-      });
-    });
+    if (embedding.tensorPath.substr(-1 * BYTES_EXTENSION.length) ===
+        BYTES_EXTENSION) {
+      dataProvider.retrieveTensorAsBytes(
+          this, this.getEmbeddingInfo(tensorName), run, tensorName, url,
+          callback);
+    } else {
+      logging.setModalMessage('Fetching tensors...', TENSORS_MSG_ID);
+      const request = new XMLHttpRequest();
+      request.open('GET', url);
+      request.responseType = 'arraybuffer';
+
+      request.onerror = () => {
+        logging.setErrorMessage(request.responseText, 'fetching tensors');
+      };
+      request.onload = () => {
+        dataProvider.parseTensors(request.response).then(points => {
+          callback(new DataSet(points));
+        });
+      };
+      request.send();
+    }
   }
 
   retrieveSpriteAndMetadata(run: string, tensorName: string,
@@ -93,14 +111,17 @@ export class DemoDataProvider implements DataProvider {
       run: string, tensorName: string, callback: (r: State[]) => void) {
     let embedding = this.getEmbeddingInfo(tensorName);
     let msgId = logging.setModalMessage('Fetching bookmarks...');
-    d3.json(embedding.bookmarksPath, (err, bookmarks: State[]) => {
-      if (err) {
-        logging.setModalMessage('Error: ' + err.responseText);
-        return;
-      }
 
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', embedding.bookmarksPath);
+    xhr.onerror = (err) => {
+      logging.setErrorMessage(xhr.responseText);
+    };
+    xhr.onload = () => {
+      const bookmarks = JSON.parse(xhr.responseText) as State[];
       logging.setModalMessage(null, msgId);
       callback(bookmarks);
-    });
+    };
+    xhr.send();
   }
 }

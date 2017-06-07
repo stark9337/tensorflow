@@ -43,6 +43,14 @@ Status SetOutputToSizedImage(InferenceContext* c, DimensionHandle batch_dim,
     width = c->UnknownDim();
     height = c->UnknownDim();
   } else {
+    // TODO(petewarden) - Remove once we have constant evaluation in C++ only.
+    if (size_tensor->dtype() != DT_INT32) {
+      return errors::InvalidArgument(
+          "Bad size input type for SetOutputToSizedImage: Expected DT_INT32 "
+          "but got ",
+          DataTypeString(size_tensor->dtype()), " for input #", size_input_idx,
+          " in ", c->DebugString());
+    }
     auto vec = size_tensor->vec<int32>();
     height = c->MakeDim(vec(0));
     width = c->MakeDim(vec(1));
@@ -74,8 +82,9 @@ Status DecodeImageShapeFn(InferenceContext* c) {
     channels_dim = c->MakeDim(channels);
   }
 
-  c->set_output(0, c->MakeShape({InferenceContext::kUnknownDim,
-                                 InferenceContext::kUnknownDim, channels_dim}));
+  c->set_output(0,
+                c->MakeShape({InferenceContext::kUnknownDim,
+                              InferenceContext::kUnknownDim, channels_dim}));
   return Status::OK();
 }
 
@@ -318,6 +327,7 @@ REGISTER_OP("DecodeJpeg")
     .Attr("fancy_upscaling: bool = true")
     .Attr("try_recover_truncated: bool = false")
     .Attr("acceptable_fraction: float = 1.0")
+    .Attr("dct_method: string = ''")
     .Output("image: uint8")
     .SetShapeFn(DecodeImageShapeFn)
     .Doc(R"doc(
@@ -339,6 +349,9 @@ The attr `ratio` allows downscaling the image by an integer factor during
 decoding.  Allowed values are: 1, 2, 4, and 8.  This is much faster than
 downscaling the image later.
 
+This op also supports decoding PNGs and non-animated GIFs since the interface is
+the same, though it is cleaner to use `tf.image.decode_image`.
+
 contents: 0-D.  The JPEG-encoded image.
 channels: Number of color channels for the decoded image.
 ratio: Downscaling ratio.
@@ -347,6 +360,12 @@ fancy_upscaling: If true use a slower but nicer upscaling of the
 try_recover_truncated:  If true try to recover an image from truncated input.
 acceptable_fraction: The minimum required fraction of lines before a truncated
   input is accepted.
+dct_method: string specifying a hint about the algorithm used for
+  decompression.  Defaults to "" which maps to a system-specific
+  default.  Currently valid values are ["INTEGER_FAST",
+  "INTEGER_ACCURATE"].  The hint may be ignored (e.g., the internal
+  jpeg library changes to a version that does not have that specific
+  option.)
 image: 3-D with shape `[height, width, channels]`..
 )doc");
 
@@ -464,6 +483,29 @@ output: The hue-adjusted image or images.
 )Doc");
 
 // --------------------------------------------------------------------------
+REGISTER_OP("AdjustSaturation")
+    .Input("images: float")
+    .Input("scale: float")
+    .Output("output: float")
+    .SetShapeFn([](InferenceContext* c) {
+      return shape_inference::UnchangedShapeWithRankAtLeast(c, 3);
+    })
+    .Doc(R"Doc(
+Adjust the saturation of one or more images.
+
+`images` is a tensor of at least 3 dimensions.  The last dimension is
+interpretted as channels, and must be three.
+
+The input image is considered in the RGB colorspace. Conceptually, the RGB
+colors are first mapped into HSV. A scale is then applied all the saturation
+values, and then remapped back to RGB colorspace.
+
+images: Images to adjust.  At least 3-D.
+scale: A float scale to add to the saturation.
+output: The hue-adjusted image or images.
+)Doc");
+
+// --------------------------------------------------------------------------
 REGISTER_OP("DecodePng")
     .Input("contents: string")
     .Attr("channels: int = 0")
@@ -485,6 +527,9 @@ Accepted values are:
 
 If needed, the PNG-encoded image is transformed to match the requested number
 of color channels.
+
+This op also supports decoding JPEGs and non-animated GIFs since the interface
+is the same, though it is cleaner to use `tf.image.decode_image`.
 
 contents: 0-D.  The PNG-encoded image.
 channels: Number of color channels for the decoded image.
@@ -519,15 +564,38 @@ contents: 0-D. PNG-encoded image.
 )doc");
 
 // --------------------------------------------------------------------------
+REGISTER_OP("DecodeBmp")
+    .Input("contents: string")
+    .Output("image: uint8")
+    .Attr("channels: int = 0")
+    .SetShapeFn(DecodeImageShapeFn)
+    .Doc(R"doc(
+Decode the first frame of a BMP-encoded image to a uint8 tensor.
+
+The attr `channels` indicates the desired number of color channels for the
+decoded image.
+
+Accepted values are:
+
+*   0: Use the number of channels in the BMP-encoded image.
+*   3: output an RGB image.
+*   4: output an RGBA image.
+
+contents: 0-D.  The BMP-encoded image.
+image: 3-D with shape `[height, width, channels]`. RGB order
+)doc");
+
+// --------------------------------------------------------------------------
 REGISTER_OP("DecodeGif")
     .Input("contents: string")
     .Output("image: uint8")
     .SetShapeFn([](InferenceContext* c) {
       ShapeHandle unused;
       TF_RETURN_IF_ERROR(c->WithRank(c->input(0), 0, &unused));
-      c->set_output(0, c->MakeShape({InferenceContext::kUnknownDim,
-                                     InferenceContext::kUnknownDim,
-                                     InferenceContext::kUnknownDim, 3}));
+      c->set_output(0,
+                    c->MakeShape({InferenceContext::kUnknownDim,
+                                  InferenceContext::kUnknownDim,
+                                  InferenceContext::kUnknownDim, 3}));
       return Status::OK();
     })
     .Doc(R"doc(
@@ -536,7 +604,10 @@ Decode the first frame of a GIF-encoded image to a uint8 tensor.
 GIF with frame or transparency compression are not supported
 convert animated GIF from compressed to uncompressed by:
 
-convert $src.gif -coalesce $dst.gif
+    convert $src.gif -coalesce $dst.gif
+
+This op also supports decoding JPEGs and PNGs, though it is cleaner to use
+`tf.image.decode_image`.
 
 contents: 0-D.  The GIF-encoded image.
 image: 4-D with shape `[num_frames, height, width, 3]`. RGB order
@@ -691,7 +762,9 @@ seed: If either `seed` or `seed2` are set to non-zero, the random number
   seed.
 seed2: A second seed to avoid seed collision.
 min_object_covered: The cropped area of the image must contain at least this
-  fraction of any bounding box supplied.
+  fraction of any bounding box supplied. The value of this parameter should be
+  non-negative. In the case of 0, the cropped area does not need to overlap
+  any of the bounding boxes supplied.
 aspect_ratio_range: The cropped area of the image must have an aspect ratio =
   width / height within this range.
 area_range: The cropped area of the image must contain a fraction of the
@@ -765,7 +838,7 @@ size: A 1-D tensor of 2 elements containing the size of the glimpses
   to extract.  The glimpse height must be specified first, following
   by the glimpse width.
 offsets: A 2-D integer tensor of shape `[batch_size, 2]` containing
-  the x, y locations of the center of each window.
+  the y, x locations of the center of each window.
 glimpse: A tensor representing the glimpses `[batch_size,
   glimpse_height, glimpse_width, channels]`.
 centered: indicates if the offset coordinates are centered relative to
@@ -827,7 +900,7 @@ boxes: A 2-D tensor of shape `[num_boxes, 4]`. The `i`-th row of the tensor
   in normalized coordinates `[y1, x1, y2, x2]`. A normalized coordinate value of
   `y` is mapped to the image coordinate at `y * (image_height - 1)`, so as the
   `[0, 1]` interval of normalized image height is mapped to
-  `[0, image_height - 1] in image height coordinates. We do allow y1 > y2, in
+  `[0, image_height - 1]` in image height coordinates. We do allow `y1` > `y2`, in
   which case the sampled crop is an up-down flipped version of the original
   image. The width dimension is treated similarly. Normalized coordinates
   outside the `[0, 1]` range are allowed, in which case we use
@@ -921,11 +994,50 @@ method: A string specifying the interpolation method. Only 'bilinear' is
 // --------------------------------------------------------------------------
 
 REGISTER_OP("NonMaxSuppression")
+  .Input("boxes: float")
+  .Input("scores: float")
+  .Input("max_output_size: int32")
+  .Output("selected_indices: int32")
+  .Attr("iou_threshold: float = 0.5")
+  .SetShapeFn([](InferenceContext* c) {
+      c->set_output(0, c->Vector(c->UnknownDim()));
+      return Status::OK();
+    })
+  .Doc(R"doc(
+Greedily selects a subset of bounding boxes in descending order of score,
+pruning away boxes that have high intersection-over-union (IOU) overlap
+with previously selected boxes.  Bounding boxes are supplied as
+[y1, x1, y2, x2], where (y1, x1) and (y2, x2) are the coordinates of any
+diagonal pair of box corners and the coordinates can be provided as normalized
+(i.e., lying in the interval [0, 1]) or absolute.  Note that this algorithm
+is agnostic to where the origin is in the coordinate system.  Note that this
+algorithm is invariant to orthogonal transformations and translations
+of the coordinate system; thus translating or reflections of the coordinate
+system result in the same boxes being selected by the algorithm.
+The output of this operation is a set of integers indexing into the input
+collection of bounding boxes representing the selected boxes.  The bounding
+box coordinates corresponding to the selected indices can then be obtained
+using the `tf.gather operation`.  For example:
+  selected_indices = tf.image.non_max_suppression(
+      boxes, scores, max_output_size, iou_threshold)
+  selected_boxes = tf.gather(boxes, selected_indices)
+boxes: A 2-D float tensor of shape `[num_boxes, 4]`.
+scores: A 1-D float tensor of shape `[num_boxes]` representing a single
+  score corresponding to each box (each row of boxes).
+max_output_size: A scalar integer tensor representing the maximum number of
+  boxes to be selected by non max suppression.
+iou_threshold: A float representing the threshold for deciding whether boxes
+  overlap too much with respect to IOU.
+selected_indices: A 1-D integer tensor of shape `[M]` representing the selected
+  indices from the boxes tensor, where `M <= max_output_size`.
+)doc");
+
+REGISTER_OP("NonMaxSuppressionV2")
     .Input("boxes: float")
     .Input("scores: float")
     .Input("max_output_size: int32")
+    .Input("iou_threshold: float")
     .Output("selected_indices: int32")
-    .Attr("iou_threshold: float = 0.5")
     .SetShapeFn([](InferenceContext* c) {
       c->set_output(0, c->Vector(c->UnknownDim()));
       return Status::OK();
@@ -947,7 +1059,7 @@ collection of bounding boxes representing the selected boxes.  The bounding
 box coordinates corresponding to the selected indices can then be obtained
 using the `tf.gather operation`.  For example:
 
-  selected_indices = tf.image.non_max_suppression(
+  selected_indices = tf.image.non_max_suppression_v2(
       boxes, scores, max_output_size, iou_threshold)
   selected_boxes = tf.gather(boxes, selected_indices)
 
@@ -956,8 +1068,8 @@ scores: A 1-D float tensor of shape `[num_boxes]` representing a single
   score corresponding to each box (each row of boxes).
 max_output_size: A scalar integer tensor representing the maximum number of
   boxes to be selected by non max suppression.
-iou_threshold: A float representing the threshold for deciding whether boxes
-  overlap too much with respect to IOU.
+iou_threshold: A 0-D float tensor representing the threshold for deciding whether
+  boxes overlap too much with respect to IOU.
 selected_indices: A 1-D integer tensor of shape `[M]` representing the selected
   indices from the boxes tensor, where `M <= max_output_size`.
 )doc");

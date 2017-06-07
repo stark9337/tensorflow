@@ -35,14 +35,14 @@ class GreedyLoadBalancingStrategy(object):
   ps ops (typically variables) are created, as it greedily places ops
   on the least-loaded ps at the point each op is processed.
 
-  One reasonable heuristic is the `variable_size_load_fn`, which
+  One reasonable heuristic is the `byte_size_load_fn`, which
   estimates load as the number of bytes that would be used to store and
   transmit the entire variable.  More advanced load functions
   could consider the difference in access patterns across ops, or trade
   off CPU-intensive ops with RAM-intensive ops with network bandwidth.
 
   This class is intended to be used as a `ps_strategy` in
-  `tf.replica_device_setter`.
+  `tf.train.replica_device_setter`.
   """
 
   def __init__(self, num_tasks, load_fn):

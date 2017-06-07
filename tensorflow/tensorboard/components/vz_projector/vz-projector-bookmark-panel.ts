@@ -41,13 +41,17 @@ export class BookmarkPanel extends BookmarkPanelPolymer {
   private selectedState: number;
   private ignoreNextProjectionEvent: boolean;
 
-  private dom: d3.Selection<any>;
+  private expandLessButton: HTMLButtonElement;
+  private expandMoreButton: HTMLButtonElement;
 
   ready() {
-    this.dom = d3.select(this);
     this.savedStates = [];
     this.setupUploadButton();
     this.ignoreNextProjectionEvent = false;
+    this.expandLessButton =
+        this.querySelector('#expand-less') as HTMLButtonElement;
+    this.expandMoreButton =
+        this.querySelector('#expand-more') as HTMLButtonElement;
   }
 
   initialize(
@@ -64,27 +68,31 @@ export class BookmarkPanel extends BookmarkPanelPolymer {
 
   setSelectedTensor(
       run: string, tensorInfo: EmbeddingInfo, dataProvider: DataProvider) {
+    // Clear any existing bookmarks.
+    this.addStates(null);
     if (tensorInfo && tensorInfo.bookmarksPath) {
-      this.loadAllStates([]);
       // Get any bookmarks that may come when the projector starts up.
       dataProvider.getBookmarks(run, tensorInfo.tensorName, bookmarks => {
-        this.loadAllStates(bookmarks);
+        this.addStates(bookmarks);
+        this._expandMore();
       });
+    } else {
+      this._expandLess();
     }
   }
 
   /** Handles a click on show bookmarks tray button. */
   _expandMore() {
-    this.$.panel.toggle();
-    this.dom.select('#expand-more').style('display', 'none');
-    this.dom.select('#expand-less').style('display', '');
+    this.$.panel.show();
+    this.expandMoreButton.style.display = 'none';
+    this.expandLessButton.style.display = '';
   }
 
   /** Handles a click on hide bookmarks tray button. */
   _expandLess() {
-    this.$.panel.toggle();
-    this.dom.select('#expand-more').style('display', '');
-    this.dom.select('#expand-less').style('display', 'none');
+    this.$.panel.hide();
+    this.expandMoreButton.style.display = '';
+    this.expandLessButton.style.display = 'none';
   }
 
   /** Handles a click on the add bookmark button. */
@@ -132,20 +140,20 @@ export class BookmarkPanel extends BookmarkPanelPolymer {
 
   private setupUploadButton() {
     // Show and setup the load view button.
-    let fileInput = this.dom.select('#state-file');
-    fileInput.on('change', () => {
-      let file: File = (d3.event as any).target.files[0];
+    const fileInput = this.querySelector('#state-file') as HTMLInputElement;
+    fileInput.onchange = () => {
+      const file: File = fileInput.files[0];
       // Clear out the value of the file chooser. This ensures that if the user
       // selects the same file, we'll re-read it.
-      (d3.event as any).target.value = '';
-      let fileReader = new FileReader();
+      fileInput.value = '';
+      const fileReader = new FileReader();
       fileReader.onload = (evt) => {
-        let str: string = (evt.target as any).result;
-        let savedStates = JSON.parse(str);
+        const str: string = fileReader.result;
+        const savedStates = JSON.parse(str);
 
         // Verify the bookmarks match.
         if (this.savedStatesValid(savedStates)) {
-          this.loadAllStates(savedStates);
+          this.addStates(savedStates);
           this.loadSavedState(0);
         } else {
           logging.setWarningMessage(
@@ -154,13 +162,17 @@ export class BookmarkPanel extends BookmarkPanelPolymer {
         }
       };
       fileReader.readAsText(file);
-    });
+    };
   }
 
-  loadAllStates(savedStates: State[]) {
-    for (let i = 0; i < savedStates.length; i++) {
-      savedStates[i].isSelected = false;
-      this.push('savedStates', savedStates[i] as any);
+  addStates(savedStates?: State[]) {
+    if (savedStates == null) {
+      this.savedStates = [];
+    } else {
+      for (let i = 0; i < savedStates.length; i++) {
+        savedStates[i].isSelected = false;
+        this.push('savedStates', savedStates[i] as any);
+      }
     }
     this.updateHasStates();
   }
@@ -168,32 +180,33 @@ export class BookmarkPanel extends BookmarkPanelPolymer {
   /** Deselects any selected state selection. */
   clearStateSelection() {
     for (let i = 0; i < this.savedStates.length; i++) {
-      if (this.savedStates[i].isSelected) {
-        this.savedStates[i].isSelected = false;
-        this.notifyPath('savedStates.' + i + '.isSelected', false, false);
-        return;
-      }
+      this.setSelectionState(i, false);
     }
   }
 
   /** Handles a radio button click on a saved state. */
   _radioButtonHandler(evt: Event) {
-    this.loadSavedState(this.getParentDataIndex(evt));
+    const index = this.getParentDataIndex(evt);
+    this.loadSavedState(index);
+    this.setSelectionState(index, true);
   }
 
   loadSavedState(index: number) {
     for (let i = 0; i < this.savedStates.length; i++) {
       if (this.savedStates[i].isSelected) {
-        this.savedStates[i].isSelected = false;
-        this.notifyPath('savedStates.' + i + '.isSelected', false, false);
+        this.setSelectionState(i, false);
       } else if (index === i) {
-        this.savedStates[i].isSelected = true;
-        this.notifyPath('savedStates.' + i + '.isSelected', true, false);
-
+        this.setSelectionState(i, true);
         this.ignoreNextProjectionEvent = true;
         this.projector.loadState(this.savedStates[i]);
       }
     }
+  }
+
+  private setSelectionState(stateIndex: number, selected: boolean) {
+    this.savedStates[stateIndex].isSelected = selected;
+    const path = 'savedStates.' + stateIndex + '.isSelected';
+    this.notifyPath(path, selected, false);
   }
 
   /**
